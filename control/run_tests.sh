@@ -172,14 +172,34 @@ while true; do
         done
         wait
         echo " ✅ Завершено."
-        
+
         # === 12. Сбор результатов ===
         echo -e "\n⬇️ Сбор результатов итерации $iter..."
         for ip in "${VMS[@]}"; do
             echo "  ← $ip"
+            
+            # ✅ СОЗДАЕМ ЦЕЛЕВУЮ ДИРЕКТОРИЮ ПЕРЕД КОПИРОВАНИЕМ
+            mkdir -p "$RESULTS_DIR/iter${iter}_results_$ip"
+            
             if [ "$RUN_FIO" = true ] || [ "$RUN_PG" = true ]; then
-                scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                    "$USER@$ip:$REMOTE_DIR/results/" "$RESULTS_DIR/iter${iter}_results_$ip/" 2>/dev/null || echo "  ⚠️ Не удалось скопировать с $ip"
+                # ✅ ДОБАВЛЯЕМ ПРОВЕРКУ НАЛИЧИЯ ИСТОЧНИКА
+                if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    "$USER@$ip" "[ -d $REMOTE_DIR/results ] && [ -n \"\$(ls -A $REMOTE_DIR/results 2>/dev/null)\" ]"; then
+                    
+                    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r \
+                        "$USER@$ip:$REMOTE_DIR/results/" "$RESULTS_DIR/iter${iter}_results_$ip/" 2>&1 | tee -a "$RESULTS_DIR/iter${iter}_scp_$ip.log"
+                    
+                    if [ $? -eq 0 ]; then
+                        echo "  ✓ Успешно скопировано с $ip"
+                    else
+                        echo "  ❌ Ошибка копирования с $ip (код: $?)" 
+                        echo "    Детали в логе: $RESULTS_DIR/iter${iter}_scp_$ip.log"
+                    fi
+                else
+                    echo "  ❌ Результаты отсутствуют на $ip"
+                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                        "$USER@$ip" "ls -la $REMOTE_DIR; ls -la $REMOTE_DIR/results 2>&1 || echo 'Директория results не существует'"
+                fi
             fi
         done
         
