@@ -6,6 +6,7 @@
 import json
 import sys
 import os
+import glob
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib
@@ -35,14 +36,19 @@ def get_color_for_storage(storage_type):
 
 def load_aggregated_data(json_file):
     """Загружает агрегированные данные из JSON"""
-    with open(json_file, 'r') as f:
-        return json.load(f)
+    try:
+        with open(json_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"❌ Ошибка загрузки {json_file}: {str(e)}")
+        return None
 
 def plot_fio_comparison(datasets, output_dir):
     """Создает графики сравнения FIO тестов с фильтрацией ненужных данных"""
     # Определяем список допустимых тестов
     valid_tests = [
         "Sequential Write",
+        "Sequential Read", 
         "Random Write",
         "Random Read",
         "Mixed RW (Read)",
@@ -218,7 +224,7 @@ def plot_fio_comparison(datasets, output_dir):
     print("✅ Улучшенные графики FIO созданы")
 
 def plot_pgbench_comparison(datasets, output_dir):
-    """Создает графики сравнения pgbench тестов"""
+    """Создает графики сравнения pgbench тестов с разными цветами для типов хранилищ"""
     # Фильтруем датасеты с данными pgbench
     pgbench_data = {label: data for label, data in datasets.items() 
                     if 'pgbench' in data and data['pgbench']}
@@ -234,7 +240,7 @@ def plot_pgbench_comparison(datasets, output_dir):
             storage_types[storage_type] = []
         storage_types[storage_type].append((label, data))
     
-    # Создаем графики
+    # Настраиваем график
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     # График TPS
@@ -305,27 +311,80 @@ def plot_pgbench_comparison(datasets, output_dir):
     
     print("✅ Улучшенные графики pgbench созданы")
 
+def find_aggregated_reports(paths):
+    """Находит файлы aggregated_report.json в указанных путях"""
+    reports = []
+    
+    for path in paths:
+        path = Path(path)
+        
+        # Если это файл, проверяем, не является ли он JSON-отчетом
+        if path.is_file() and path.name == 'aggregated_report.json':
+            reports.append(str(path))
+            continue
+            
+        # Если это директория, ищем в ней файл aggregated_report.json
+        if path.is_dir():
+            report_file = path / 'aggregated_report.json'
+            if report_file.exists() and report_file.is_file():
+                reports.append(str(report_file))
+                print(f"✅ Найден файл агрегированных данных: {report_file}")
+                continue
+                
+            # Если в директории нет файла, ищем в поддиректориях
+            for subdir in path.iterdir():
+                if subdir.is_dir():
+                    report_file = subdir / 'aggregated_report.json'
+                    if report_file.exists() and report_file.is_file():
+                        reports.append(str(report_file))
+                        print(f"✅ Найден файл агрегированных данных: {report_file}")
+                        continue
+            continue
+            
+        print(f"⚠️  Не удалось найти файл агрегированных данных в: {path}")
+    
+    return reports
+
 def main():
     if len(sys.argv) < 2:
-        print("Использование: python3 visualize_results.py <json_файл1> [json_файл2] ...")
-        print("\nПример:")
-        print("  python3 visualize_results.py results/*/aggregated_report.json")
-        print("  python3 visualize_results.py storage1.json storage2.json")
+        print("Использование: python3 visualize_results.py <папка1> [<папка2> ...]")
+        print("\nПримеры:")
+        print("  python3 visualize_results.py results/*/")
+        print("  python3 visualize_results.py results/20251203_1121_iscsi_1vms_2iter results/20251203_1230_local_1vms_2iter")
+        sys.exit(1)
+    
+    # Находим все файлы aggregated_report.json в указанных путях
+    report_files = find_aggregated_reports(sys.argv[1:])
+    
+    if not report_files:
+        print("❌ Не удалось найти файлы агрегированных данных")
+        print("   Убедитесь, что вы выполнили агрегацию результатов:")
+        print("   python3 aggregate_results.py <папка_с_результатами>")
         sys.exit(1)
     
     # Загружаем все JSON файлы
     datasets = {}
-    for json_path in sys.argv[1:]:
-        if not os.path.exists(json_path):
-            print(f"⚠️  Файл не найден: {json_path}")
-            continue
+    for json_path in report_files:
         data = load_aggregated_data(json_path)
-        # Извлекаем метку из пути (например, имя директории)
-        label = Path(json_path).parent.name
-        if label == "." or not label:
-            label = Path(json_path).stem
-        datasets[label] = data
-        print(f"✅ Загружен: {json_path} -> {label}")
+        if data:
+            # Извлекаем метку из пути (имя директории)
+            parent_dir = Path(json_path).parent
+            label = parent_dir.name
+            
+            # Определяем тип хранилища из имени директории
+            storage_type = get_storage_type(label)
+            
+            # Создаем уникальную метку
+            unique_label = f"{storage_type}_{label.split('_')[-3]}vms"
+            if unique_label in datasets:
+                # Если метка уже существует, добавляем суффикс
+                suffix = 1
+                while f"{unique_label}_{suffix}" in datasets:
+                    suffix += 1
+                unique_label = f"{unique_label}_{suffix}"
+            
+            datasets[unique_label] = data
+            print(f"✅ Загружен: {json_path} -> {unique_label}")
     
     if not datasets:
         print("❌ Не удалось загрузить данные")
