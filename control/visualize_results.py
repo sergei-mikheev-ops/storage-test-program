@@ -44,41 +44,53 @@ def get_color_for_storage(storage_type):
     return STORAGE_COLORS.get(storage_type, STORAGE_COLORS['default'])
 
 def plot_fio_comparison(datasets, output_dir):
-    """Создает графики сравнения FIO тестов с цветовой схемой"""
+    """Создает графики сравнения FIO тестов с фильтрацией ненужных данных"""
     # Получаем все уникальные имена тестов
     all_tests = set()
     for data in datasets.values():
         if 'fio' in data:
             all_tests.update(data['fio'].keys())
-    all_tests = sorted(all_tests)
     
-    # Создаем цветовую схему для каждого типа хранилища
-    storage_types = {}
-    for label in datasets.keys():
-        storage_type = get_storage_type(label)
-        if storage_type not in storage_types:
-            storage_types[storage_type] = []
-        storage_types[storage_type].append((label, datasets[label]))
+    # Фильтруем только нужные типы тестов
+    valid_tests = [
+        "Sequential Read",
+        "Random Write",
+        "Random Read",
+        "Mixed RW (Read)",
+        "Mixed RW (Write)"
+    ]
+    filtered_tests = [test for test in all_tests if test in valid_tests]
+    
+    # Сортируем тесты в нужном порядке
+    test_order = {test: idx for idx, test in enumerate(valid_tests)}
+    filtered_tests = sorted(filtered_tests, key=lambda x: test_order.get(x, 999))
+    
+    # Если нет данных для визуализации
+    if not filtered_tests:
+        print("⚠️  Нет данных FIO для визуализации")
+        return
     
     # График IOPS
     fig, ax = plt.subplots(figsize=(14, 8))
-    x = np.arange(len(all_tests))
-    width = 0.8 / len(storage_types)
+    x = range(len(filtered_tests))
+    width = 0.8 / len(datasets)
     
-    for idx, (storage_type, data_list) in enumerate(storage_types.items()):
+    for idx, (label, data) in enumerate(datasets.items()):
+        storage_type = get_storage_type(label)
+        color = get_color_for_storage(storage_type)
+        
         iops_values = []
         iops_errors = []
-        for test in all_tests:
-            avg_iops = []
-            for _, data in data_list:
-                if test in data.get('fio', {}):
-                    avg_iops.append(data['fio'][test]['IOPS_mean'])
-            iops_values.append(np.mean(avg_iops) if avg_iops else 0)
-            iops_errors.append(np.std(avg_iops) if len(avg_iops) > 1 else 0)
+        for test in filtered_tests:
+            if test in data.get('fio', {}):
+                iops_values.append(data['fio'][test]['IOPS_mean'])
+                iops_errors.append(data['fio'][test]['IOPS_stdev'])
+            else:
+                iops_values.append(0)
+                iops_errors.append(0)
         
-        offset = width * idx - width * (len(storage_types) - 1) / 2
-        color = get_color_for_storage(storage_type)
-        bars = ax.bar(x + offset, iops_values, width, 
+        offset = width * idx - width * (len(datasets) - 1) / 2
+        bars = ax.bar([i + offset for i in x], iops_values, width, 
                       label=storage_type.upper(), 
                       yerr=iops_errors, 
                       capsize=5, 
@@ -88,15 +100,16 @@ def plot_fio_comparison(datasets, output_dir):
         # Добавляем значения на столбцы
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                     f'{height:.1f}',
-                     ha='center', va='bottom', fontsize=9)
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                        f'{height:.1f}',
+                        ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('IOPS (тысячи)', fontsize=12)
     ax.set_title('Сравнение IOPS между типами хранилищ', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in all_tests], rotation=0, ha='center')
+    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
     ax.legend(title='Тип хранилища')
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
@@ -105,20 +118,22 @@ def plot_fio_comparison(datasets, output_dir):
     
     # График Bandwidth
     fig, ax = plt.subplots(figsize=(14, 8))
-    for idx, (storage_type, data_list) in enumerate(storage_types.items()):
+    for idx, (label, data) in enumerate(datasets.items()):
+        storage_type = get_storage_type(label)
+        color = get_color_for_storage(storage_type)
+        
         bw_values = []
         bw_errors = []
-        for test in all_tests:
-            avg_bw = []
-            for _, data in data_list:
-                if test in data.get('fio', {}):
-                    avg_bw.append(data['fio'][test]['Bandwidth_mean'])
-            bw_values.append(np.mean(avg_bw) if avg_bw else 0)
-            bw_errors.append(np.std(avg_bw) if len(avg_bw) > 1 else 0)
+        for test in filtered_tests:
+            if test in data.get('fio', {}):
+                bw_values.append(data['fio'][test]['Bandwidth_mean'])
+                bw_errors.append(data['fio'][test]['Bandwidth_stdev'])
+            else:
+                bw_values.append(0)
+                bw_errors.append(0)
         
-        offset = width * idx - width * (len(storage_types) - 1) / 2
-        color = get_color_for_storage(storage_type)
-        bars = ax.bar(x + offset, bw_values, width,
+        offset = width * idx - width * (len(datasets) - 1) / 2
+        bars = ax.bar([i + offset for i in x], bw_values, width,
                       label=storage_type.upper(),
                       yerr=bw_errors,
                       capsize=5,
@@ -128,15 +143,16 @@ def plot_fio_comparison(datasets, output_dir):
         # Добавляем значения на столбцы
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                     f'{height:.1f}',
-                     ha='center', va='bottom', fontsize=9)
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                        f'{height:.1f}',
+                        ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('Bandwidth (MiB/s)', fontsize=12)
     ax.set_title('Сравнение Bandwidth между типами хранилищ', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in all_tests], rotation=0, ha='center')
+    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
     ax.legend(title='Тип хранилища')
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
@@ -145,20 +161,22 @@ def plot_fio_comparison(datasets, output_dir):
     
     # График Latency
     fig, ax = plt.subplots(figsize=(14, 8))
-    for idx, (storage_type, data_list) in enumerate(storage_types.items()):
+    for idx, (label, data) in enumerate(datasets.items()):
+        storage_type = get_storage_type(label)
+        color = get_color_for_storage(storage_type)
+        
         lat_values = []
         lat_errors = []
-        for test in all_tests:
-            avg_lat = []
-            for _, data in data_list:
-                if test in data.get('fio', {}):
-                    avg_lat.append(data['fio'][test]['Latency_mean'])
-            lat_values.append(np.mean(avg_lat) if avg_lat else 0)
-            lat_errors.append(np.std(avg_lat) if len(avg_lat) > 1 else 0)
+        for test in filtered_tests:
+            if test in data.get('fio', {}):
+                lat_values.append(data['fio'][test]['Latency_mean'])
+                lat_errors.append(data['fio'][test]['Latency_stdev'])
+            else:
+                lat_values.append(0)
+                lat_errors.append(0)
         
-        offset = width * idx - width * (len(storage_types) - 1) / 2
-        color = get_color_for_storage(storage_type)
-        bars = ax.bar(x + offset, lat_values, width,
+        offset = width * idx - width * (len(datasets) - 1) / 2
+        bars = ax.bar([i + offset for i in x], lat_values, width,
                       label=storage_type.upper(),
                       yerr=lat_errors,
                       capsize=5,
@@ -168,15 +186,16 @@ def plot_fio_comparison(datasets, output_dir):
         # Добавляем значения на столбцы
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                     f'{height:.1f}',
-                     ha='center', va='bottom', fontsize=9)
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                        f'{height:.1f}',
+                        ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('Latency (ms)', fontsize=12)
     ax.set_title('Сравнение задержки между типами хранилищ', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in all_tests], rotation=0, ha='center')
+    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
     ax.legend(title='Тип хранилища')
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
