@@ -44,163 +44,88 @@ def get_color_for_storage(storage_type):
     return STORAGE_COLORS.get(storage_type, STORAGE_COLORS['default'])
 
 def plot_fio_comparison(datasets, output_dir):
-    """Создает графики сравнения FIO тестов с фильтрацией ненужных данных"""
+    """Создает графики сравнения FIO тестов с улучшенной визуализацией значений"""
     # Получаем все уникальные имена тестов
     all_tests = set()
     for data in datasets.values():
         if 'fio' in data:
             all_tests.update(data['fio'].keys())
+    all_tests = sorted(all_tests)
     
-    # Фильтруем только нужные типы тестов
-    valid_tests = [
-        "Sequential Read",
-        "Random Write",
-        "Random Read",
-        "Mixed RW (Read)",
-        "Mixed RW (Write)"
-    ]
-    filtered_tests = [test for test in all_tests if test in valid_tests]
-    
-    # Сортируем тесты в нужном порядке
-    test_order = {test: idx for idx, test in enumerate(valid_tests)}
-    filtered_tests = sorted(filtered_tests, key=lambda x: test_order.get(x, 999))
-    
-    # Если нет данных для визуализации
-    if not filtered_tests:
-        print("⚠️  Нет данных FIO для визуализации")
-        return
-    
-    # График IOPS
-    fig, ax = plt.subplots(figsize=(14, 8))
-    x = range(len(filtered_tests))
-    width = 0.8 / len(datasets)
-    
-    for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
+    # Создаем графики
+    for metric in ['IOPS', 'Bandwidth', 'Latency']:
+        # Создаем график с дополнительным пространством сверху для заголовка
+        fig, ax = plt.subplots(figsize=(14, 8))
+        plt.subplots_adjust(top=0.85)  # Оставляем 15% пространства для заголовка
         
-        iops_values = []
-        iops_errors = []
-        for test in filtered_tests:
-            if test in data.get('fio', {}):
-                iops_values.append(data['fio'][test]['IOPS_mean'])
-                iops_errors.append(data['fio'][test]['IOPS_stdev'])
-            else:
-                iops_values.append(0)
-                iops_errors.append(0)
+        x = range(len(all_tests))
+        width = 0.8 / len(datasets)
         
-        offset = width * idx - width * (len(datasets) - 1) / 2
-        bars = ax.bar([i + offset for i in x], iops_values, width, 
-                      label=storage_type.upper(), 
-                      yerr=iops_errors, 
-                      capsize=5, 
-                      color=color,
-                      alpha=0.8)
+        # Собираем данные для текущего метрика
+        all_values = []
+        all_errors = []
+        for idx, (label, data) in enumerate(datasets.items()):
+            values = []
+            errors = []
+            for test in all_tests:
+                if test in data.get('fio', {}):
+                    values.append(data['fio'][test][f'{metric}_mean'])
+                    errors.append(data['fio'][test][f'{metric}_stdev'])
+                else:
+                    values.append(0)
+                    errors.append(0)
+            all_values.append(values)
+            all_errors.append(errors)
         
-        # Добавляем значения на столбцы
-        for i, bar in enumerate(bars):
-            height = bar.get_height()
-            if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                        f'{height:.1f}',
-                        ha='center', va='bottom', fontsize=9)
-    
-    ax.set_xlabel('Тип теста', fontsize=12)
-    ax.set_ylabel('IOPS (тысячи)', fontsize=12)
-    ax.set_title('Сравнение IOPS между типами хранилищ', fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
-    ax.legend(title='Тип хранилища')
-    ax.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fio_iops_comparison.png'), dpi=300)
-    plt.close()
-    
-    # График Bandwidth
-    fig, ax = plt.subplots(figsize=(14, 8))
-    for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
+        # Определяем максимальную высоту для установки ylim
+        max_height = 0
+        for values, errors in zip(all_values, all_errors):
+            for i in range(len(values)):
+                height = values[i] + errors[i]
+                if height > max_height:
+                    max_height = height
         
-        bw_values = []
-        bw_errors = []
-        for test in filtered_tests:
-            if test in data.get('fio', {}):
-                bw_values.append(data['fio'][test]['Bandwidth_mean'])
-                bw_errors.append(data['fio'][test]['Bandwidth_stdev'])
-            else:
-                bw_values.append(0)
-                bw_errors.append(0)
+        # Устанавливаем верхнюю границу с отступом
+        if max_height > 0:
+            ax.set_ylim(0, max_height * 1.15)
         
-        offset = width * idx - width * (len(datasets) - 1) / 2
-        bars = ax.bar([i + offset for i in x], bw_values, width,
-                      label=storage_type.upper(),
-                      yerr=bw_errors,
-                      capsize=5,
-                      color=color,
-                      alpha=0.8)
+        # Рисуем столбцы
+        for idx, (label, data) in enumerate(datasets.items()):
+            values = all_values[idx]
+            errors = all_errors[idx]
+            offset = width * idx - width * (len(datasets) - 1) / 2
+            bars = ax.bar([i + offset for i in x], values, width,
+                          label=label, yerr=errors, capsize=5, alpha=0.8)
+            
+            # Добавляем значения над столбцами
+            for i, (bar, val, err) in enumerate(zip(bars, values, errors)):
+                height = val + err
+                # Проверяем, не превышает ли высота 80% от верхней границы
+                if height > 0.8 * ax.get_ylim()[1]:
+                    fontsize = 7
+                else:
+                    fontsize = 9
+                # Форматируем текст в зависимости от метрики
+                if metric == 'Latency':
+                    text = f'{val:.2f}'
+                else:
+                    text = f'{val:.1f}'
+                
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        text,
+                        ha='center', va='bottom', fontsize=fontsize)
         
-        # Добавляем значения на столбцы
-        for i, bar in enumerate(bars):
-            height = bar.get_height()
-            if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                        f'{height:.1f}',
-                        ha='center', va='bottom', fontsize=9)
-    
-    ax.set_xlabel('Тип теста', fontsize=12)
-    ax.set_ylabel('Bandwidth (MiB/s)', fontsize=12)
-    ax.set_title('Сравнение Bandwidth между типами хранилищ', fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
-    ax.legend(title='Тип хранилища')
-    ax.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fio_bandwidth_comparison.png'), dpi=300)
-    plt.close()
-    
-    # График Latency
-    fig, ax = plt.subplots(figsize=(14, 8))
-    for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
-        
-        lat_values = []
-        lat_errors = []
-        for test in filtered_tests:
-            if test in data.get('fio', {}):
-                lat_values.append(data['fio'][test]['Latency_mean'])
-                lat_errors.append(data['fio'][test]['Latency_stdev'])
-            else:
-                lat_values.append(0)
-                lat_errors.append(0)
-        
-        offset = width * idx - width * (len(datasets) - 1) / 2
-        bars = ax.bar([i + offset for i in x], lat_values, width,
-                      label=storage_type.upper(),
-                      yerr=lat_errors,
-                      capsize=5,
-                      color=color,
-                      alpha=0.8)
-        
-        # Добавляем значения на столбцы
-        for i, bar in enumerate(bars):
-            height = bar.get_height()
-            if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                        f'{height:.1f}',
-                        ha='center', va='bottom', fontsize=9)
-    
-    ax.set_xlabel('Тип теста', fontsize=12)
-    ax.set_ylabel('Latency (ms)', fontsize=12)
-    ax.set_title('Сравнение задержки между типами хранилищ', fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels([t.replace(' ', '\n') for t in filtered_tests], rotation=0, ha='center')
-    ax.legend(title='Тип хранилища')
-    ax.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fio_latency_comparison.png'), dpi=300)
-    plt.close()
+        # Настройки графика
+        ax.set_xlabel('Тип теста', fontsize=12)
+        ax.set_ylabel(f'{metric} ({"тысячи" if metric == "IOPS" else "MiB/s" if metric == "Bandwidth" else "ms"})', fontsize=12)
+        ax.set_title(f'Сравнение {metric} между типами хранилищ', fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels([t.replace(' ', '\n') for t in all_tests], rotation=0, ha='center')
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'fio_{metric.lower()}_comparison.png'), dpi=300)
+        plt.close()
     
     print("✅ Улучшенные графики FIO созданы")
 
