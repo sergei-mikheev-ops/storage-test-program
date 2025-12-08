@@ -44,25 +44,22 @@ def load_aggregated_data(json_file):
         return None
 
 def plot_fio_comparison(datasets, output_dir):
-    """Создает графики сравнения FIO тестов с фильтрацией ненужных данных"""
-    # Определяем список допустимых тестов
+    """Создает графики сравнения FIO тестов с отображением значений внутри столбцов"""
+    # Получаем все уникальные имена тестов
+    all_tests = set()
+    for data in datasets.values():
+        if 'fio' in data:
+            all_tests.update(data['fio'].keys())
+    
+    # Определяем допустимые тесты
     valid_tests = [
         "Sequential Write",
-        "Sequential Read", 
         "Random Write",
         "Random Read",
         "Mixed RW (Read)",
         "Mixed RW (Write)",
         "Sequential Read"
     ]
-    
-    # Собираем данные по всем тестам
-    all_tests = set()
-    for data in datasets.values():
-        if 'fio' in data:
-            all_tests.update(data['fio'].keys())
-    
-    # Фильтруем только допустимые тесты
     filtered_tests = [test for test in all_tests if test in valid_tests]
     
     # Сортируем тесты в нужном порядке
@@ -70,7 +67,7 @@ def plot_fio_comparison(datasets, output_dir):
     filtered_tests = sorted(filtered_tests, key=lambda x: test_order.get(x, 999))
     
     if not filtered_tests:
-        print("⚠️  Нет данных для отображения. Проверьте, что в данных есть тесты из списка допустимых.")
+        print("⚠️ Нет данных для отображения. Проверьте, что в данных есть тесты из списка допустимых.")
         return
     
     # График IOPS
@@ -80,9 +77,6 @@ def plot_fio_comparison(datasets, output_dir):
     
     # Для каждого типа хранилища
     for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
-        
         iops_values = []
         iops_errors = []
         for test in filtered_tests:
@@ -95,24 +89,24 @@ def plot_fio_comparison(datasets, output_dir):
         
         offset = width * idx - width * (len(datasets) - 1) / 2
         bars = ax.bar([i + offset for i in x], iops_values, width,
-                      label=storage_type.upper(),
-                      yerr=iops_errors,
-                      capsize=5,
-                      color=color,
-                      alpha=0.8)
+                      label=label, yerr=iops_errors, capsize=5, alpha=0.8)
         
         # Добавляем значения на столбцы с проверкой высоты
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            # Если высота превышает 80% от верхней границы, уменьшаем размер шрифта
-            if height > 0.8 * ax.get_ylim()[1]:
-                fontsize = 7
+            # Если высота столбца больше 10% от верхней границы, отображаем внутри
+            if height > 0.1 * ax.get_ylim()[1]:
+                # Вычисляем позицию текста (середина столбца)
+                text_y = height * 0.5
+                # Используем белый цвет для текста внутри столбца
+                ax.text(bar.get_x() + bar.get_width()/2., text_y,
+                       f'{height:.1f}',
+                       ha='center', va='center', fontsize=9, color='white')
             else:
-                fontsize = 9
-            # Добавляем значение над столбцом
-            ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                   f'{height:.1f}',
-                   ha='center', va='bottom', fontsize=fontsize)
+                # Если столбец низкий, отображаем над ним
+                ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                       f'{height:.1f}',
+                       ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('IOPS (тысячи)', fontsize=12)
@@ -125,12 +119,9 @@ def plot_fio_comparison(datasets, output_dir):
     plt.savefig(os.path.join(output_dir, 'fio_iops_comparison.png'), dpi=300)
     plt.close()
     
-    # График Bandwidth
+    # График Bandwidth (аналогично)
     fig, ax = plt.subplots(figsize=(14, 8))
     for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
-        
         bw_values = []
         bw_errors = []
         for test in filtered_tests:
@@ -143,24 +134,20 @@ def plot_fio_comparison(datasets, output_dir):
         
         offset = width * idx - width * (len(datasets) - 1) / 2
         bars = ax.bar([i + offset for i in x], bw_values, width,
-                      label=storage_type.upper(),
-                      yerr=bw_errors,
-                      capsize=5,
-                      color=color,
-                      alpha=0.8)
+                      label=label, yerr=bw_errors, capsize=5, alpha=0.8)
         
-        # Добавляем значения на столбцы с проверкой высоты
+        # Добавляем значения на столбцы
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            # Если высота превышает 80% от верхней границы, уменьшаем размер шрифта
-            if height > 0.8 * ax.get_ylim()[1]:
-                fontsize = 7
+            if height > 0.1 * ax.get_ylim()[1]:
+                text_y = height * 0.5
+                ax.text(bar.get_x() + bar.get_width()/2., text_y,
+                       f'{height:.1f}',
+                       ha='center', va='center', fontsize=9, color='white')
             else:
-                fontsize = 9
-            # Добавляем значение над столбцом
-            ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                   f'{height:.1f}',
-                   ha='center', va='bottom', fontsize=fontsize)
+                ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                       f'{height:.1f}',
+                       ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('Bandwidth (MiB/s)', fontsize=12)
@@ -173,12 +160,9 @@ def plot_fio_comparison(datasets, output_dir):
     plt.savefig(os.path.join(output_dir, 'fio_bandwidth_comparison.png'), dpi=300)
     plt.close()
     
-    # График Latency
+    # График Latency (аналогично)
     fig, ax = plt.subplots(figsize=(14, 8))
     for idx, (label, data) in enumerate(datasets.items()):
-        storage_type = get_storage_type(label)
-        color = get_color_for_storage(storage_type)
-        
         lat_values = []
         lat_errors = []
         for test in filtered_tests:
@@ -191,24 +175,20 @@ def plot_fio_comparison(datasets, output_dir):
         
         offset = width * idx - width * (len(datasets) - 1) / 2
         bars = ax.bar([i + offset for i in x], lat_values, width,
-                      label=storage_type.upper(),
-                      yerr=lat_errors,
-                      capsize=5,
-                      color=color,
-                      alpha=0.8)
+                      label=label, yerr=lat_errors, capsize=5, alpha=0.8)
         
-        # Добавляем значения на столбцы с проверкой высоты
+        # Добавляем значения на столбцы
         for i, bar in enumerate(bars):
             height = bar.get_height()
-            # Если высота превышает 80% от верхней границы, уменьшаем размер шрифта
-            if height > 0.8 * ax.get_ylim()[1]:
-                fontsize = 7
+            if height > 0.1 * ax.get_ylim()[1]:
+                text_y = height * 0.5
+                ax.text(bar.get_x() + bar.get_width()/2., text_y,
+                       f'{height:.1f}',
+                       ha='center', va='center', fontsize=9, color='white')
             else:
-                fontsize = 9
-            # Добавляем значение над столбцом
-            ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
-                   f'{height:.1f}',
-                   ha='center', va='bottom', fontsize=fontsize)
+                ax.text(bar.get_x() + bar.get_width()/2., height + (height * 0.05),
+                       f'{height:.1f}',
+                       ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Тип теста', fontsize=12)
     ax.set_ylabel('Latency (ms)', fontsize=12)
