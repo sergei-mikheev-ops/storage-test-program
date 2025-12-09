@@ -16,23 +16,34 @@ def parse_results_sheet(file_path):
     try:
         with open(file_path, 'r') as f:
             content = f.read()
+        
+        # Ищем раздел с основными результатами
+        main_results_start = content.find("Основные результаты тестов:")
+        if main_results_start == -1:
+            return None
+            
+        # Ищем конец раздела основных результатов
+        latency_section_start = content.find("Детализированная информация о задержках:")
+        if latency_section_start == -1:
+            latency_section_start = len(content)
+        
+        main_results_content = content[main_results_start:latency_section_start]
+        
         results = {
             'fio': {},
             'pgbench': {}
         }
-        # Парсинг FIO результатов
+        
+        # Парсинг FIO результатов из основного раздела
         fio_pattern = r'(\d+)\s+(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)'
-        for match in re.finditer(fio_pattern, content):
-            test_num = int(match.group(1))
-            test_name = match.group(2).strip()
-            iops = float(match.group(3))
-            bandwidth = float(match.group(4))
-            latency = float(match.group(5))
-            results['fio'][test_name] = {
-                'IOPS': iops,
-                'Bandwidth': bandwidth,
-                'Latency': latency
+        for match in re.finditer(fio_pattern, main_results_content):
+            test_num, test_name, iops, bandwidth, latency = match.groups()
+            results['fio'][test_name.strip()] = {
+                'IOPS': float(iops),
+                'Bandwidth': float(bandwidth),
+                'Latency': float(latency)
             }
+        
         # Парсинг pgbench результатов
         tps_match = re.search(r'TPS.*?:\s*([\d.]+)', content)
         lat_avg_match = re.search(r'Средняя задержка:\s*([\d.]+)', content)
