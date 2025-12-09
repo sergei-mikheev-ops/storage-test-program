@@ -3,7 +3,6 @@
 Скрипт для агрегации результатов множественных итераций тестирования.
 Вычисляет средние значения, стандартные отклонения и создает сводные отчеты.
 """
-
 import os
 import re
 import json
@@ -17,28 +16,28 @@ def parse_results_sheet(file_path):
     try:
         with open(file_path, 'r') as f:
             content = f.read()
-        
         results = {
             'fio': {},
             'pgbench': {}
         }
-        
         # Парсинг FIO результатов
         fio_pattern = r'(\d+)\s+(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)'
         for match in re.finditer(fio_pattern, content):
-            test_num, test_name, iops, bandwidth, latency = match.groups()
-            results['fio'][test_name.strip()] = {
-                'IOPS': float(iops),
-                'Bandwidth': float(bandwidth),
-                'Latency': float(latency)
+            test_num = int(match.group(1))
+            test_name = match.group(2).strip()
+            iops = float(match.group(3))
+            bandwidth = float(match.group(4))
+            latency = float(match.group(5))
+            results['fio'][test_name] = {
+                'IOPS': iops,
+                'Bandwidth': bandwidth,
+                'Latency': latency
             }
-        
         # Парсинг pgbench результатов
         tps_match = re.search(r'TPS.*?:\s*([\d.]+)', content)
         lat_avg_match = re.search(r'Средняя задержка:\s*([\d.]+)', content)
         lat_std_match = re.search(r'Стандартное отклонение задержки:\s*([\d.]+)', content)
         transactions_match = re.search(r'Обработано транзакций:\s*(\d+)', content)
-        
         if tps_match:
             results['pgbench'] = {
                 'TPS': float(tps_match.group(1)),
@@ -46,7 +45,6 @@ def parse_results_sheet(file_path):
                 'Latency_Stddev': float(lat_std_match.group(1)) if lat_std_match else None,
                 'Transactions': int(transactions_match.group(1)) if transactions_match else None
             }
-        
         return results
     except Exception as e:
         print(f"⚠️ Ошибка парсинга {file_path}: {e}")
@@ -56,51 +54,51 @@ def aggregate_results(results_dir):
     """Агрегирует результаты всех итераций"""
     results_dir = Path(results_dir)
     
-    # Поиск всех файлов results_sheet
-    iterations_data = {}
+    # Поиск всех файлов с результатами
+    all_result_files = []
     
-    # Ищем файлы напрямую и в поддиректориях
-    all_result_files = list(results_dir.glob('**/results_sheet_*.txt'))
+    # Ищем во всех поддиректориях
+    for root, dirs, files in os.walk(results_dir):
+        for file in files:
+            if file.startswith('results_sheet_') and file.endswith('.txt'):
+                all_result_files.append(Path(os.path.join(root, file)))
     
     if not all_result_files:
-        print("❌ Не найдено файлов results_sheet_*.txt")
+        print("❌ Не найдено файлов результатов")
+        print(f"🔍 Поиск проводился в: {results_dir}")
+        print("🔍 Искались файлы: results_sheet_*.txt")
+        # Показать содержимое директории для диагностики
+        print("\n📂 Содержимое директории:")
+        for item in results_dir.rglob('*'):
+            if item.is_file():
+                print(f"  • {item.relative_to(results_dir)}")
         return None
     
-    print(f"Найдено {len(all_result_files)} файлов результатов:")
-    
+    print(f"✅ Найдено {len(all_result_files)} файлов результатов:")
     for file in all_result_files:
         print(f"  • {file.relative_to(results_dir)}")
-        
-        # Извлекаем номер итерации из пути к файлу или из имени директории
-        iter_num = None
-        
-        # Попытка 1: из имени директории (iter1, iter2, etc.)
-        for parent in file.parents:
-            iter_match = re.search(r'iter(\d+)', parent.name)
-            if iter_match:
-                iter_num = int(iter_match.group(1))
+    
+    # Группировка результатов по итерациям
+    iterations_data = {}
+    
+    for file_path in all_result_files:
+        # Извлекаем номер итерации из пути
+        iter_num = 1  # значение по умолчанию
+        parts = str(file_path).split('/')
+        for part in parts:
+            if 'iter' in part.lower() and part.lower().replace('iter', '').isdigit():
+                iter_num = int(part.lower().replace('iter', ''))
                 break
         
-        # Попытка 2: из имени файла (если содержит iter)
-        if iter_num is None:
-            iter_match = re.search(r'iter(\d+)', file.name)
+        # Если итерация не найдена в пути, пытаемся найти в имени файла
+        if iter_num == 1:
+            file_name = file_path.name
+            iter_match = re.search(r'iter(\d+)', file_name)
             if iter_match:
                 iter_num = int(iter_match.group(1))
         
-        # Попытка 3: по timestamp (группируем по времени)
-        if iter_num is None:
-            # Если нет явного номера итерации, используем timestamp как идентификатор
-            timestamp_match = re.search(r'(\d{8}_\d{6})', file.name)
-            if timestamp_match:
-                # Создаем псевдо-номер итерации на основе хэша timestamp
-                timestamp = timestamp_match.group(1)
-                iter_num = hash(timestamp) % 1000  # Используем хэш для уникальности
-        
-        # По умолчанию - итерация 1
-        if iter_num is None:
-            iter_num = 1
-        
-        parsed = parse_results_sheet(file)
+        # Парсим файл
+        parsed = parse_results_sheet(file_path)
         if parsed:
             if iter_num not in iterations_data:
                 iterations_data[iter_num] = []
@@ -110,12 +108,15 @@ def aggregate_results(results_dir):
         print("❌ Не удалось распарсить результаты")
         return None
     
+    # Определяем количество ВМ (берем из первой итерации)
+    num_vms = len(iterations_data[next(iter(iterations_data))])
+    
     # Агрегация по итерациям
     aggregated = {
         'fio': {},
         'pgbench': {},
         'iterations': sorted(iterations_data.keys()),
-        'num_vms': len(iterations_data[list(iterations_data.keys())[0]])
+        'num_vms': num_vms
     }
     
     # Агрегация FIO
@@ -124,37 +125,39 @@ def aggregate_results(results_dir):
         for vm_result in iter_results:
             all_fio_tests.update(vm_result['fio'].keys())
     
-    for test_name in all_fio_tests:
+    for test_name in sorted(all_fio_tests):
         metrics = {'IOPS': [], 'Bandwidth': [], 'Latency': []}
-        
         for iter_results in iterations_data.values():
             for vm_result in iter_results:
                 if test_name in vm_result['fio']:
-                    for metric in metrics.keys():
-                        metrics[metric].append(vm_result['fio'][test_name][metric])
+                    metrics['IOPS'].append(vm_result['fio'][test_name]['IOPS'])
+                    metrics['Bandwidth'].append(vm_result['fio'][test_name]['Bandwidth'])
+                    metrics['Latency'].append(vm_result['fio'][test_name]['Latency'])
         
-        aggregated['fio'][test_name] = {
-            'IOPS_mean': mean(metrics['IOPS']),
-            'IOPS_stdev': stdev(metrics['IOPS']) if len(metrics['IOPS']) > 1 else 0,
-            'Bandwidth_mean': mean(metrics['Bandwidth']),
-            'Bandwidth_stdev': stdev(metrics['Bandwidth']) if len(metrics['Bandwidth']) > 1 else 0,
-            'Latency_mean': mean(metrics['Latency']),
-            'Latency_stdev': stdev(metrics['Latency']) if len(metrics['Latency']) > 1 else 0,
-            'samples': len(metrics['IOPS'])
-        }
+        if metrics['IOPS']:  # если есть данные для этого теста
+            aggregated['fio'][test_name] = {
+                'IOPS_mean': mean(metrics['IOPS']),
+                'IOPS_stdev': stdev(metrics['IOPS']) if len(metrics['IOPS']) > 1 else 0,
+                'Bandwidth_mean': mean(metrics['Bandwidth']),
+                'Bandwidth_stdev': stdev(metrics['Bandwidth']) if len(metrics['Bandwidth']) > 1 else 0,
+                'Latency_mean': mean(metrics['Latency']),
+                'Latency_stdev': stdev(metrics['Latency']) if len(metrics['Latency']) > 1 else 0,
+                'samples': len(metrics['IOPS'])
+            }
     
     # Агрегация pgbench
     pgbench_metrics = {'TPS': [], 'Latency_Avg': [], 'Latency_Stddev': [], 'Transactions': []}
+    pgbench_found = False
     
     for iter_results in iterations_data.values():
         for vm_result in iter_results:
-            if vm_result['pgbench']:
+            if 'pgbench' in vm_result and vm_result['pgbench']:
+                pgbench_found = True
                 for metric, values in pgbench_metrics.items():
-                    val = vm_result['pgbench'].get(metric)
-                    if val is not None:
-                        values.append(val)
+                    if vm_result['pgbench'].get(metric) is not None:
+                        values.append(vm_result['pgbench'][metric])
     
-    if pgbench_metrics['TPS']:
+    if pgbench_found and pgbench_metrics['TPS']:
         aggregated['pgbench'] = {
             'TPS_mean': mean(pgbench_metrics['TPS']),
             'TPS_stdev': stdev(pgbench_metrics['TPS']) if len(pgbench_metrics['TPS']) > 1 else 0,
@@ -162,8 +165,6 @@ def aggregate_results(results_dir):
             'Latency_Avg_stdev': stdev(pgbench_metrics['Latency_Avg']) if len(pgbench_metrics['Latency_Avg']) > 1 else 0,
             'samples': len(pgbench_metrics['TPS'])
         }
-    else:
-        print("⚠️  Нет результатов pgbench для агрегации")
     
     return aggregated
 
@@ -184,12 +185,11 @@ def generate_report(aggregated, output_file):
         report.append("FIO - Тестирование дисковой подсистемы (средние значения)")
         report.append("="*80)
         report.append("")
-        report.append(f"{'Test Name':<30} {'IOPS':<20} {'Bandwidth (MiB/s)':<20} {'Latency (ms)':<20}")
+        report.append(f"{'Test Name':<35} {'IOPS':<20} {'Bandwidth (MiB/s)':<20} {'Latency (ms)':<20}")
         report.append("-"*80)
-        
         for test_name, metrics in sorted(aggregated['fio'].items()):
             report.append(
-                f"{test_name:<30} "
+                f"{test_name:<35} "
                 f"{metrics['IOPS_mean']:>8.1f} ±{metrics['IOPS_stdev']:>6.1f}  "
                 f"{metrics['Bandwidth_mean']:>8.1f} ±{metrics['Bandwidth_stdev']:>6.1f}  "
                 f"{metrics['Latency_mean']:>8.2f} ±{metrics['Latency_stdev']:>6.2f}"
@@ -197,7 +197,7 @@ def generate_report(aggregated, output_file):
         report.append("")
     
     # pgbench результаты
-    if aggregated['pgbench']:
+    if 'pgbench' in aggregated and aggregated['pgbench']:
         report.append("="*80)
         report.append("pgbench - Тестирование PostgreSQL OLTP (средние значения)")
         report.append("="*80)
@@ -212,7 +212,7 @@ def generate_report(aggregated, output_file):
         report.append("pgbench - Тестирование PostgreSQL OLTP")
         report.append("="*80)
         report.append("")
-        report.append("⚠️  Результаты pgbench отсутствуют (тест не запускался или не был включен)")
+        report.append("ℹ️  Результаты pgbench отсутствуют (тест не запускался или не был включен)")
         report.append("")
     
     report.append("="*80)
@@ -227,43 +227,45 @@ def generate_report(aggregated, output_file):
     # Сохранение в файл
     with open(output_file, 'w') as f:
         f.write(report_text)
-    
     print(f"\n📄 Отчет сохранен: {output_file}")
-    
     return report_text
 
 def save_json(aggregated, output_file):
     """Сохраняет агрегированные данные в JSON"""
     with open(output_file, 'w') as f:
-        json.dump(aggregated, f, indent=2)
+        json.dump(aggregated, f, indent=2, ensure_ascii=False)
     print(f"📊 JSON данные сохранены: {output_file}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Использование: python3 aggregate_results.py <путь_к_директории_с_результатами>")
+        print("Использование: python3 aggregate_results.py <путь_к_директории_с_результатами> [путь_2] ...")
+        print("\nПримеры:")
+        print("  python3 aggregate_results.py results/20251203_1121_iscsi_1vms_2iter/")
+        print("  python3 aggregate_results.py results/*/")
         sys.exit(1)
     
-    results_dir = sys.argv[1]
+    # Обработка нескольких директорий
+    for results_dir in sys.argv[1:]:
+        if not os.path.exists(results_dir):
+            print(f"❌ Директория не найдена: {results_dir}")
+            continue
+        
+        print(f"\n{'='*60}")
+        print(f"📁 Анализ результатов в: {results_dir}")
+        print("⏳ Обработка данных...")
+        
+        aggregated = aggregate_results(results_dir)
+        if not aggregated:
+            print("❌ Не удалось агрегировать результаты")
+            continue
+        
+        # Генерация отчетов
+        output_base = os.path.join(results_dir, "aggregated_report")
+        generate_report(aggregated, f"{output_base}.txt")
+        save_json(aggregated, f"{output_base}.json")
     
-    if not os.path.exists(results_dir):
-        print(f"❌ Директория не найдена: {results_dir}")
-        sys.exit(1)
-    
-    print(f"📁 Анализ результатов в: {results_dir}")
-    print("⏳ Обработка данных...")
-    
-    aggregated = aggregate_results(results_dir)
-    
-    if not aggregated:
-        print("❌ Не удалось агрегировать результаты")
-        sys.exit(1)
-    
-    # Генерация отчетов
-    output_base = os.path.join(results_dir, "aggregated_report")
-    generate_report(aggregated, f"{output_base}.txt")
-    save_json(aggregated, f"{output_base}.json")
-    
-    print("\n✅ Агрегация завершена!")
+    print(f"\n{'='*60}")
+    print("✅ Агрегация завершена для всех директорий!")
 
 if __name__ == "__main__":
     main()
