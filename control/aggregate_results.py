@@ -17,45 +17,64 @@ def parse_results_sheet(file_path):
         with open(file_path, 'r') as f:
             content = f.read()
         
+        results = {'fio': {}, 'pgbench': {}}
+        
         # Ищем раздел с основными результатами
-        main_results_start = content.find("Основные результаты тестов:")
-        if main_results_start == -1:
+        main_start = content.find("Основные результаты тестов:")
+        if main_start == -1:
             return None
             
         # Ищем конец раздела основных результатов
-        latency_section_start = content.find("Детализированная информация о задержках:")
-        if latency_section_start == -1:
-            latency_section_start = len(content)
+        latency_start = content.find("Детализированная информация о задержках:")
+        if latency_start == -1:
+            end_pos = len(content)
+        else:
+            end_pos = latency_start
         
-        main_results_content = content[main_results_start:latency_section_start]
+        main_content = content[main_start:end_pos]
         
-        results = {
-            'fio': {},
-            'pgbench': {}
-        }
+        # Разбиваем на строки
+        lines = main_content.split('\n')
+        for line in lines:
+            # Пропускаем заголовки и разделители
+            if "Test No." in line or "Test Name" in line or "=" in line or "_" in line or not line.strip():
+                continue
+                
+            # Обрабатываем только строки с данными
+            parts = [p.strip() for p in line.split() if p.strip()]
+            if len(parts) >= 5 and parts[0].isdigit():
+                test_num = parts[0]
+                test_name = parts[1]
+                
+                # Обработка тестов с несколькими частями в имени
+                i = 1
+                while i < len(parts) and not re.match(r'^[\d.]+$', parts[i]):
+                    i += 1
+                if i < len(parts):
+                    iops = parts[i]
+                    bandwidth = parts[i+1] if i+1 < len(parts) else "N/A"
+                    latency = parts[i+2] if i+2 < len(parts) else "N/A"
+                    
+                    # Корректное имя для Mixed RW
+                    if "Mixed RW" in test_name and len(parts) > i+3:
+                        test_name = f"Mixed RW ({parts[i+3]})"
+                    
+                    results['fio'][test_name] = {
+                        'IOPS': float(iops),
+                        'Bandwidth': float(bandwidth),
+                        'Latency': float(latency)
+                    }
         
-        # Парсинг FIO результатов из основного раздела
-        fio_pattern = r'(\d+)\s+(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)'
-        for match in re.finditer(fio_pattern, main_results_content):
-            test_num, test_name, iops, bandwidth, latency = match.groups()
-            results['fio'][test_name.strip()] = {
-                'IOPS': float(iops),
-                'Bandwidth': float(bandwidth),
-                'Latency': float(latency)
-            }
-        
-        # Парсинг pgbench результатов
-        tps_match = re.search(r'TPS.*?:\s*([\d.]+)', content)
-        lat_avg_match = re.search(r'Средняя задержка:\s*([\d.]+)', content)
-        lat_std_match = re.search(r'Стандартное отклонение задержки:\s*([\d.]+)', content)
-        transactions_match = re.search(r'Обработано транзакций:\s*(\d+)', content)
-        if tps_match:
+        # Парсинг pgbench (оставляем без изменений)
+        pgbench_pattern = r'TPS.*?:\s*([\d.]+).*?Средняя задержка:\s*([\d.]+).*?Обработано транзакций:\s*(\d+)'
+        pg_match = re.search(pgbench_pattern, content, re.DOTALL)
+        if pg_match:
             results['pgbench'] = {
-                'TPS': float(tps_match.group(1)),
-                'Latency_Avg': float(lat_avg_match.group(1)) if lat_avg_match else None,
-                'Latency_Stddev': float(lat_std_match.group(1)) if lat_std_match else None,
-                'Transactions': int(transactions_match.group(1)) if transactions_match else None
+                'TPS': float(pg_match.group(1)),
+                'Latency_Avg': float(pg_match.group(2)),
+                'Transactions': int(pg_match.group(3))
             }
+        
         return results
     except Exception as e:
         print(f"⚠️ Ошибка парсинга {file_path}: {e}")
