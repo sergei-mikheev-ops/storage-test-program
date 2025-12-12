@@ -11,8 +11,8 @@ from pathlib import Path
 from statistics import mean, stdev
 from datetime import datetime
 
-def parse_results_sheet(file_path):
-    """Парсит файл results_sheet и извлекает метрики"""
+ef parse_results_sheet(file_path):
+    """Парсит файл results_sheet и извлекает метрики с сохранением форматирования"""
     try:
         with open(file_path, 'r') as f:
             content = f.read()
@@ -22,6 +22,7 @@ def parse_results_sheet(file_path):
         # Ищем раздел с основными результатами
         main_start = content.find("Основные результаты тестов:")
         if main_start == -1:
+            print(f"⚠️ Не найден раздел 'Основные результаты тестов' в файле {file_path}")
             return None
             
         # Ищем конец раздела основных результатов
@@ -33,39 +34,54 @@ def parse_results_sheet(file_path):
         
         main_content = content[main_start:end_pos]
         
-        # Разбиваем на строки
+        # Разбиваем на строки и обрабатываем каждую
         lines = main_content.split('\n')
-        for line in lines:
-            # Пропускаем заголовки и разделители
-            if "Test No." in line or "Test Name" in line or "=" in line or "_" in line or not line.strip():
-                continue
-                
-            # Обрабатываем только строки с данными
-            parts = [p.strip() for p in line.split() if p.strip()]
-            if len(parts) >= 5 and parts[0].isdigit():
-                test_num = parts[0]
-                test_name = parts[1]
-                
-                # Обработка тестов с несколькими частями в имени
-                i = 1
-                while i < len(parts) and not re.match(r'^[\d.]+$', parts[i]):
-                    i += 1
-                if i < len(parts):
-                    iops = parts[i]
-                    bandwidth = parts[i+1] if i+1 < len(parts) else "N/A"
-                    latency = parts[i+2] if i+2 < len(parts) else "N/A"
-                    
-                    # Корректное имя для Mixed RW
-                    if "Mixed RW" in test_name and len(parts) > i+3:
-                        test_name = f"Mixed RW ({parts[i+3]})"
-                    
-                    results['fio'][test_name] = {
-                        'IOPS': float(iops),
-                        'Bandwidth': float(bandwidth),
-                        'Latency': float(latency)
-                    }
+        current_test_number = 0
+        current_test_name = ""
         
-        # Парсинг pgbench (оставляем без изменений)
+        for line in lines:
+            # Пропускаем заголовки, разделители и пустые строки
+            if not line.strip() or "Test No." in line or "=" in line or "_" in line:
+                continue
+            
+            # Обрабатываем строку с данными
+            parts = [p.strip() for p in line.split() if p.strip()]
+            
+            # Пропускаем строки, которые не содержат достаточно данных
+            if len(parts) < 5:
+                continue
+            
+            # Проверяем, начинается ли строка с цифры (номер теста)
+            if parts[0].isdigit():
+                current_test_number = int(parts[0])
+                current_test_name = " ".join(parts[1:-3])
+                iops = parts[-3]
+                bandwidth = parts[-2]
+                latency = parts[-1]
+                
+                # Добавляем тест в результаты
+                results['fio'][current_test_name] = {
+                    'IOPS': float(iops),
+                    'Bandwidth': float(bandwidth),
+                    'Latency': float(latency)
+                }
+            else:
+                # Если строка не начинается с цифры, это продолжение предыдущего теста
+                # (например, Mixed RW имеет две строки с номером 5)
+                current_test_name = " ".join(parts[:-3])
+                iops = parts[-3]
+                bandwidth = parts[-2]
+                latency = parts[-1]
+                
+                # Формируем уникальное имя для дублирующихся номеров тестов
+                unique_name = f"{current_test_name} ({parts[0]})"
+                results['fio'][unique_name] = {
+                    'IOPS': float(iops),
+                    'Bandwidth': float(bandwidth),
+                    'Latency': float(latency)
+                }
+        
+        # Парсинг pgbench остается без изменений
         pgbench_pattern = r'TPS.*?:\s*([\d.]+).*?Средняя задержка:\s*([\d.]+).*?Обработано транзакций:\s*(\d+)'
         pg_match = re.search(pgbench_pattern, content, re.DOTALL)
         if pg_match:
@@ -81,81 +97,43 @@ def parse_results_sheet(file_path):
         return None
 
 def aggregate_results(results_dir):
-    """Агрегирует результаты всех итераций"""
+    """Агрегирует результаты всех итераций с сохранением оригинальных названий тестов"""
     results_dir = Path(results_dir)
-    
-    # Поиск всех файлов с результатами
-    all_result_files = []
-    
-    # Ищем во всех поддиректориях
-    for root, dirs, files in os.walk(results_dir):
-        for file in files:
-            if file.startswith('results_sheet_') and file.endswith('.txt'):
-                all_result_files.append(Path(os.path.join(root, file)))
-    
-    if not all_result_files:
-        print("❌ Не найдено файлов результатов")
-        print(f"🔍 Поиск проводился в: {results_dir}")
-        print("🔍 Искались файлы: results_sheet_*.txt")
-        # Показать содержимое директории для диагностики
-        print("\n📂 Содержимое директории:")
-        for item in results_dir.rglob('*'):
-            if item.is_file():
-                print(f"  • {item.relative_to(results_dir)}")
-        return None
-    
-    print(f"✅ Найдено {len(all_result_files)} файлов результатов:")
-    for file in all_result_files:
-        print(f"  • {file.relative_to(results_dir)}")
-    
-    # Группировка результатов по итерациям
     iterations_data = {}
     
-    for file_path in all_result_files:
-        # Извлекаем номер итерации из пути
-        iter_num = 1  # значение по умолчанию
-        parts = str(file_path).split('/')
-        for part in parts:
-            if 'iter' in part.lower() and part.lower().replace('iter', '').isdigit():
-                iter_num = int(part.lower().replace('iter', ''))
-                break
-        
-        # Если итерация не найдена в пути, пытаемся найти в имени файла
-        if iter_num == 1:
-            file_name = file_path.name
-            iter_match = re.search(r'iter(\d+)', file_name)
+    # Собираем все файлы результатов
+    for subdir in results_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+        for file in subdir.glob('results_sheet_*.txt'):
+            iter_match = re.search(r'iter(\d+)', str(subdir))
             if iter_match:
                 iter_num = int(iter_match.group(1))
-        
-        # Парсим файл
-        parsed = parse_results_sheet(file_path)
-        if parsed:
-            if iter_num not in iterations_data:
-                iterations_data[iter_num] = []
-            iterations_data[iter_num].append(parsed)
+                parsed = parse_results_sheet(file)
+                if parsed:
+                    if iter_num not in iterations_data:
+                        iterations_data[iter_num] = []
+                    iterations_data[iter_num].append(parsed)
     
     if not iterations_data:
-        print("❌ Не удалось распарсить результаты")
+        print("❌ Не найдено результатов для агрегации")
         return None
     
-    # Определяем количество ВМ (берем из первой итерации)
-    num_vms = len(iterations_data[next(iter(iterations_data))])
-    
-    # Агрегация по итерациям
     aggregated = {
         'fio': {},
         'pgbench': {},
         'iterations': sorted(iterations_data.keys()),
-        'num_vms': num_vms
+        'num_vms': len(iterations_data[list(iterations_data.keys())[0]])
     }
     
-    # Агрегация FIO
-    all_fio_tests = set()
+    # Собираем все уникальные названия тестов
+    all_test_names = set()
     for iter_results in iterations_data.values():
         for vm_result in iter_results:
-            all_fio_tests.update(vm_result['fio'].keys())
+            all_test_names.update(vm_result['fio'].keys())
     
-    for test_name in sorted(all_fio_tests):
+    # Агрегируем данные для каждого теста с сохранением оригинальных названий
+    for test_name in sorted(all_test_names):
         metrics = {'IOPS': [], 'Bandwidth': [], 'Latency': []}
         for iter_results in iterations_data.values():
             for vm_result in iter_results:
@@ -174,8 +152,10 @@ def aggregate_results(results_dir):
                 'Latency_stdev': stdev(metrics['Latency']) if len(metrics['Latency']) > 1 else 0,
                 'samples': len(metrics['IOPS'])
             }
+        else:
+            print(f"⚠️ Не удалось собрать данные для теста {test_name}")
     
-    # Агрегация pgbench
+    # Агрегация pgbench остается без изменений
     pgbench_metrics = {'TPS': [], 'Latency_Avg': [], 'Latency_Stddev': [], 'Transactions': []}
     pgbench_found = False
     
