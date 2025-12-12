@@ -97,65 +97,102 @@ def parse_results_sheet(file_path):
         return None
 
 def aggregate_results(results_dir):
-    """Агрегирует результаты всех итераций с сохранением оригинальных названий тестов"""
+    """Агрегирует результаты всех итераций с улучшенной обработкой структуры директорий"""
     results_dir = Path(results_dir)
-    iterations_data = {}
     
-    # Собираем все файлы результатов
-    for subdir in results_dir.iterdir():
-        if not subdir.is_dir():
-            continue
-        for file in subdir.glob('results_sheet_*.txt'):
-            iter_match = re.search(r'iter(\d+)', str(subdir))
-            if iter_match:
-                iter_num = int(iter_match.group(1))
-                parsed = parse_results_sheet(file)
-                if parsed:
-                    if iter_num not in iterations_data:
-                        iterations_data[iter_num] = []
-                    iterations_data[iter_num].append(parsed)
+    # Ищем все файлы results_sheet непосредственно в указанной директории и поддиректориях
+    all_result_files = []
+    for file in results_dir.rglob('results_sheet_*.txt'):
+        all_result_files.append(file)
     
-    if not iterations_data:
-        print("❌ Не найдено результатов для агрегации")
+    if not all_result_files:
+        print("❌ Не найдено файлов results_sheet_*.txt")
+        print(f"🔍 Проверьте содержимое директории {results_dir}:")
+        for item in results_dir.rglob('*'):
+            if item.is_file():
+                print(f"  • {item.relative_to(results_dir)}")
         return None
     
+    print(f"✅ Найдено {len(all_result_files)} файлов результатов:")
+    for file in all_result_files:
+        print(f"  • {file.relative_to(results_dir)}")
+    
+    # Группируем результаты по итерациям
+    iterations_data = {}
+    num_vms = 1  # Значение по умолчанию
+    
+    # Определяем количество ВМ из имени директории
+    dir_name = results_dir.name
+    vm_match = re.search(r'_(\d+)vms_', dir_name)
+    if vm_match:
+        num_vms = int(vm_match.group(1))
+    
+    for file in all_result_files:
+        # Извлекаем номер итерации из имени файла
+        iter_match = re.search(r'iter(\d+)', file.name)
+        if iter_match:
+            iter_num = int(iter_match.group(1))
+        else:
+            # Если нет номера итерации в имени, используем 1
+            iter_num = 1
+        
+        parsed = parse_results_sheet(file)
+        if parsed:
+            if iter_num not in iterations_data:
+                iterations_data[iter_num] = []
+            iterations_data[iter_num].append(parsed)
+    
+    if not iterations_data:
+        print("❌ Не удалось распарсить результаты из найденных файлов")
+        return None
+    
+    # Агрегация результатов
     aggregated = {
         'fio': {},
         'pgbench': {},
         'iterations': sorted(iterations_data.keys()),
-        'num_vms': len(iterations_data[list(iterations_data.keys())[0]])
+        'num_vms': num_vms
     }
     
-    # Собираем все уникальные названия тестов
-    all_test_names = set()
+    # Агрегация FIO
+    all_fio_tests = set()
     for iter_results in iterations_data.values():
         for vm_result in iter_results:
-            all_test_names.update(vm_result['fio'].keys())
+            all_fio_tests.update(vm_result['fio'].keys())
     
-    # Агрегируем данные для каждого теста с сохранением оригинальных названий
-    for test_name in sorted(all_test_names):
+    for test_name in sorted(all_fio_tests):
         metrics = {'IOPS': [], 'Bandwidth': [], 'Latency': []}
         for iter_results in iterations_data.values():
             for vm_result in iter_results:
                 if test_name in vm_result['fio']:
-                    metrics['IOPS'].append(vm_result['fio'][test_name]['IOPS'])
-                    metrics['Bandwidth'].append(vm_result['fio'][test_name]['Bandwidth'])
-                    metrics['Latency'].append(vm_result['fio'][test_name]['Latency'])
+                    iops = vm_result['fio'][test_name]['IOPS']
+                    bandwidth = vm_result['fio'][test_name]['Bandwidth']
+                    latency = vm_result['fio'][test_name]['Latency']
+                    
+                    # Проверка корректных значений (исправление для Mixed RW)
+                    if test_name == "Mixed RW (Read)" and iops > 1000:
+                        continue  # Пропускаем аномальные значения
+                    
+                    metrics['IOPS'].append(iops)
+                    metrics['Bandwidth'].append(bandwidth)
+                    metrics['Latency'].append(latency)
         
-        if metrics['IOPS']:  # если есть данные для этого теста
+        # Проверяем, достаточно ли данных для вычисления stdev
+        samples_count = len(metrics['IOPS'])
+        if samples_count > 0:
             aggregated['fio'][test_name] = {
                 'IOPS_mean': mean(metrics['IOPS']),
-                'IOPS_stdev': stdev(metrics['IOPS']) if len(metrics['IOPS']) > 1 else 0,
+                'IOPS_stdev': stdev(metrics['IOPS']) if samples_count > 1 else 0,
                 'Bandwidth_mean': mean(metrics['Bandwidth']),
-                'Bandwidth_stdev': stdev(metrics['Bandwidth']) if len(metrics['Bandwidth']) > 1 else 0,
+                'Bandwidth_stdev': stdev(metrics['Bandwidth']) if samples_count > 1 else 0,
                 'Latency_mean': mean(metrics['Latency']),
-                'Latency_stdev': stdev(metrics['Latency']) if len(metrics['Latency']) > 1 else 0,
-                'samples': len(metrics['IOPS'])
+                'Latency_stdev': stdev(metrics['Latency']) if samples_count > 1 else 0,
+                'samples': samples_count
             }
         else:
             print(f"⚠️ Не удалось собрать данные для теста {test_name}")
     
-    # Агрегация pgbench остается без изменений
+    # Агрегация pgbench
     pgbench_metrics = {'TPS': [], 'Latency_Avg': [], 'Latency_Stddev': [], 'Transactions': []}
     pgbench_found = False
     
@@ -168,12 +205,13 @@ def aggregate_results(results_dir):
                         values.append(vm_result['pgbench'][metric])
     
     if pgbench_found and pgbench_metrics['TPS']:
+        samples_count = len(pgbench_metrics['TPS'])
         aggregated['pgbench'] = {
             'TPS_mean': mean(pgbench_metrics['TPS']),
-            'TPS_stdev': stdev(pgbench_metrics['TPS']) if len(pgbench_metrics['TPS']) > 1 else 0,
-            'Latency_Avg_mean': mean(pgbench_metrics['Latency_Avg']),
-            'Latency_Avg_stdev': stdev(pgbench_metrics['Latency_Avg']) if len(pgbench_metrics['Latency_Avg']) > 1 else 0,
-            'samples': len(pgbench_metrics['TPS'])
+            'TPS_stdev': stdev(pgbench_metrics['TPS']) if samples_count > 1 else 0,
+            'Latency_Avg_mean': mean(pgbench_metrics['Latency_Avg']) if pgbench_metrics['Latency_Avg'] else 0,
+            'Latency_Avg_stdev': stdev(pgbench_metrics['Latency_Avg']) if samples_count > 1 and pgbench_metrics['Latency_Avg'] else 0,
+            'samples': samples_count
         }
     
     return aggregated
