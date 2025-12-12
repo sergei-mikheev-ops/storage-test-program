@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from datetime import datetime
 
-ef parse_results_sheet(file_path):
+def parse_results_sheet(file_path):
     """Парсит файл results_sheet и извлекает метрики с сохранением форматирования"""
     try:
         with open(file_path, 'r') as f:
