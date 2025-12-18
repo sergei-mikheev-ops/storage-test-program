@@ -8,6 +8,22 @@ ask_with_default() {
     echo "${value:-$default}"
 }
 
+# === Переменные для сохранения параметров предыдущего теста ===
+PREV_PARAMS_SET=false
+declare -a PREV_VMS=()
+PREV_VM_COUNT=0
+PREV_STORAGE_TYPE=""
+PREV_ITERATIONS=0
+PREV_TEST_MODE=""
+PREV_RUN_FIO=false
+PREV_RUN_PG=false
+PREV_TEST_NAME=""
+PREV_SIZE=""
+PREV_BS=""
+PREV_MIX=""
+PREV_IO_DEPTH=0
+PREV_RUNTIME=0
+
 # === Настройки ===
 USER="testuser"
 REMOTE_DIR="/home/$USER"
@@ -19,8 +35,10 @@ if [ ! -f "$LOCAL_SCRIPT" ]; then
     exit 1
 fi
 
-# === Основной цикл тестов ===
+# === Основной цикл ===
 while true; do
+    USE_PREV_PARAMS=false
+    
     # === 1. Запрос типа хранилища ===
     echo
     echo "=== Выберите тип хранилища ==="
@@ -33,59 +51,104 @@ while true; do
         *) echo "❌ Неверный выбор. Используется локальное хранилище."; STORAGE_TYPE="local" ;;
     esac
     
-    # === 2. Запрос количества ВМ и IP ===
-    read -p "Сколько ВМ будут участвовать в тесте? (например, 1, 2, 4): " VM_COUNT
-    if ! [[ "$VM_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-        echo "❌ Ошибка: введите целое число ≥ 1"
-        exit 1
+    # === 2. Выбор использования параметров предыдущего теста ===
+    if [ "$PREV_PARAMS_SET" = true ]; then
+        echo
+        read -p "Использовать параметры предыдущего теста? (y/N): " use_prev
+        if [[ $use_prev =~ ^[Yy]$ ]]; then
+            USE_PREV_PARAMS=true
+        fi
     fi
     
-    declare -a VMS
-    for ((i=1; i<=VM_COUNT; i++)); do
-        read -p "Введите IP-адрес ВМ #$i: " ip
-        if [[ ! $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "❌ Некорректный IP: $ip"
+    # === 3. Запрос количества ВМ и IP ===
+    if [ "$USE_PREV_PARAMS" = true ]; then
+        VM_COUNT=$PREV_VM_COUNT
+        VMS=("${PREV_VMS[@]}")
+        echo -e "\n✅ Используем параметры предыдущего теста:"
+        echo "• Количество ВМ: $VM_COUNT"
+        echo "• IP-адреса: ${VMS[*]}"
+    else
+        read -p "Сколько ВМ будут участвовать в тесте? (например, 1, 2, 4): " VM_COUNT
+        if ! [[ "$VM_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "❌ Ошибка: введите целое число ≥ 1"
             exit 1
         fi
-        VMS+=("$ip")
-    done
-    
-    # === 3. Количество итераций ===
-    ITERATIONS=$(ask_with_default "Количество итераций тестов" "3")
-    if ! [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]]; then
-        echo "❌ Ошибка: введите целое число ≥ 1"
-        exit 1
+        
+        declare -a VMS
+        for ((i=1; i<=VM_COUNT; i++)); do
+            while true; do
+                read -p "Введите IP-адрес ВМ #$i: " ip
+                if [[ ! $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "❌ Некорректный IP: $ip"
+                    continue
+                fi
+                # Проверка на дублирование
+                if [[ " ${VMS[*]} " =~ " $ip " ]]; then
+                    echo "⚠️ IP $ip уже добавлен. Введите другой IP."
+                    continue
+                fi
+                VMS+=("$ip")
+                break
+            done
+        done
     fi
     
-    # === 4. Выбор типа теста ===
-    echo
-    echo "Выберите тип теста:"
-    echo "  1) Только fio"
-    echo "  2) Только pgbench"
-    echo "  3) fio + pgbench (рекомендуется)"
-    read -p "Ваш выбор (1/2/3): " TEST_MODE
-    case $TEST_MODE in
-        1) RUN_FIO=true;   RUN_PG=false;  ;;
-        2) RUN_FIO=false;  RUN_PG=true;   ;;
-        3) RUN_FIO=true;   RUN_PG=true;   ;;
-        *) echo "❌ Неверный выбор. Используется fio + pgbench."; RUN_FIO=true; RUN_PG=true ;;
-    esac
+    # === 4. Количество итераций ===
+    if [ "$USE_PREV_PARAMS" = true ]; then
+        ITERATIONS=$PREV_ITERATIONS
+        echo "• Количество итераций: $ITERATIONS"
+    else
+        ITERATIONS=$(ask_with_default "Количество итераций тестов" "3")
+        if ! [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "❌ Ошибка: введите целое число ≥ 1"
+            exit 1
+        fi
+    fi
     
-    # === 5. Параметры fio (если нужен) ===
-    if [ "$RUN_FIO" = true ]; then
+    # === 5. Выбор типа теста ===
+    if [ "$USE_PREV_PARAMS" = true ]; then
+        TEST_MODE=$PREV_TEST_MODE
+        RUN_FIO=$PREV_RUN_FIO
+        RUN_PG=$PREV_RUN_PG
+        echo "• Тесты: $( [ "$RUN_FIO" = true ] && echo "fio " )$( [ "$RUN_PG" = true ] && echo "pgbench" )"
+    else
         echo
-        echo "=== Настройка fio (оставьте пустым для значений по умолчанию) ==="
-        # Формируем правильное имя теста на основе типа хранилища
-        DEFAULT_TEST_NAME="${STORAGE_TYPE}_${VM_COUNT}vms"
-        TEST_NAME=$(ask_with_default "Название теста" "$DEFAULT_TEST_NAME")
-        SIZE=$(ask_with_default "Размер файла" "10G")
-        BS=$(ask_with_default "Размер блока" "4k")
-        MIX=$(ask_with_default "Процент записи в RW" "60")
-        IO_DEPTH=$(ask_with_default "Глубина очереди" "64")
-        RUNTIME=$(ask_with_default "Время выполнения (сек)" "60")
+        echo "Выберите тип теста:"
+        echo "  1) Только fio"
+        echo "  2) Только pgbench"
+        echo "  3) fio + pgbench (рекомендуется)"
+        read -p "Ваш выбор (1/2/3): " TEST_MODE
+        case $TEST_MODE in
+            1) RUN_FIO=true;   RUN_PG=false;  ;;
+            2) RUN_FIO=false;  RUN_PG=true;   ;;
+            3) RUN_FIO=true;   RUN_PG=true;   ;;
+            *) echo "❌ Неверный выбор. Используется fio + pgbench."; RUN_FIO=true; RUN_PG=true ;;
+        esac
     fi
     
-    # === 6. Подтверждение ===
+    # === 6. Параметры fio (если нужен) ===
+    if [ "$RUN_FIO" = true ]; then
+        if [ "$USE_PREV_PARAMS" = true ]; then
+            TEST_NAME=$PREV_TEST_NAME
+            SIZE=$PREV_SIZE
+            BS=$PREV_BS
+            MIX=$PREV_MIX
+            IO_DEPTH=$PREV_IO_DEPTH
+            RUNTIME=$PREV_RUNTIME
+            echo "• fio: ${SIZE}, блок=${BS}, время=${RUNTIME} сек"
+        else
+            echo
+            echo "=== Настройка fio (оставьте пустым для значений по умолчанию) ==="
+            TEST_NAME=$(ask_with_default "Название теста" "${STORAGE_TYPE}_${VM_COUNT}vms")
+            SIZE=$(ask_with_default "Размер файла" "10G")
+            BS=$(ask_with_default "Размер блока" "4k")
+            MIX=$(ask_with_default "Процент записи в RW" "60")
+            IO_DEPTH=$(ask_with_default "Глубина очереди" "64")
+            RUNTIME=$(ask_with_default "Время выполнения (сек)" "60")
+        fi
+    fi
+    
+    # === 7. Подтверждение ===
     echo
     echo "=== Подтверждение конфигурации ==="
     echo "• Тип хранилища: $STORAGE_TYPE"
@@ -103,7 +166,7 @@ while true; do
         exit 0
     fi
     
-    # === 7. Копирование скрипта на ВМ ===
+    # === 8. Копирование скрипта на ВМ ===
     echo -e "\n📤 Копирование скрипта на ВМ..."
     for ip in "${VMS[@]}"; do
         scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -115,13 +178,13 @@ while true; do
         echo "  → Скопировано: $ip"
     done
     
-    # === 8. Создание директории для результатов ===
+    # === 9. Создание директории для результатов ===
     TIMESTAMP=$(date +%Y%m%d_%H%M)
     RESULTS_DIR="results/${TIMESTAMP}_${STORAGE_TYPE}_${VM_COUNT}vms_${ITERATIONS}iter"
     mkdir -p "$RESULTS_DIR"
     echo "📁 Результаты будут сохранены в: ./$RESULTS_DIR/"
     
-    # === 9. Цикл по итерациям ===
+    # === 10. Цикл по итерациям ===
     for ((iter=1; iter<=ITERATIONS; iter++)); do
         echo -e "\n$(printf '=%.0s' {1..60})"
         echo "🔄 ИТЕРАЦИЯ $iter из $ITERATIONS для хранилища $STORAGE_TYPE"
@@ -135,7 +198,7 @@ while true; do
             echo "  → Очищено: $ip"
         done
         
-        # === 10. Формирование команды ===
+        # === 11. Формирование команды ===
         if [ "$RUN_FIO" = true ]; then
             CMD="cd $REMOTE_DIR && python3 ./test_fio_7.py"
             CMD="$CMD --test-name '${TEST_NAME}_iter${iter}'"
@@ -146,18 +209,16 @@ while true; do
             CMD="$CMD --runtime $RUNTIME"
         fi
         
-        # Если выбран только pgbench — запускаем его отдельно
-        if [ "$RUN_FIO" = false ] && [ "$RUN_PG" = true ]; then
-            CMD="mkdir -p $REMOTE_DIR/results && cd $REMOTE_DIR && sudo -u postgres pgbench -i -s100 postgres"
-            CMD="$CMD && sudo -u postgres pgbench -c32 -j4 -T600 -P30 postgres > results/pgbench_iter${iter}_output.txt 2>&1"
+        if [ "$RUN_PG" = true ]; then
+            if [ "$RUN_FIO" = true ]; then
+                CMD="$CMD --run-pgbench"
+            else
+                CMD="mkdir -p $REMOTE_DIR/results && cd $REMOTE_DIR && sudo -u postgres pgbench -i -s100 postgres"
+                CMD="$CMD && sudo -u postgres pgbench -c32 -j4 -T600 -P30 postgres > results/pgbench_iter${iter}_output.txt 2>&1"
+            fi
         fi
         
-        # Если fio + pgbench — добавляем флаг
-        if [ "$RUN_FIO" = true ] && [ "$RUN_PG" = true ]; then
-            CMD="$CMD --run-pgbench"
-        fi
-        
-        # === 11. Запуск на всех ВМ с прогресс-баром ===
+        # === 12. Запуск с прогресс-баром ===
         echo -e "\n🚀 Запуск тестов на ${#VMS[@]} ВМ (итерация $iter)..."
         PIDS=()
         for ip in "${VMS[@]}"; do
@@ -177,15 +238,14 @@ while true; do
         wait
         echo " ✅ Завершено."
         
-        # === 12. Сбор результатов итерации ===
+        # === 13. Сбор результатов ===
         echo -e "\n⬇️ Сбор результатов итерации $iter..."
         for ip in "${VMS[@]}"; do
             echo "  ← $ip"
-            # ✅ Создаем целевую директорию перед копированием
+            # ✅ СОЗДАЕМ ЦЕЛЕВУЮ ДИРЕКТОРИЮ ПЕРЕД КОПИРОВАНИЕМ
             mkdir -p "$RESULTS_DIR/iter${iter}_results_$ip"
-            
             if [ "$RUN_FIO" = true ] || [ "$RUN_PG" = true ]; then
-                # ✅ Проверяем наличие источника перед копированием
+                # ✅ ДОБАВЛЯЕМ ПРОВЕРКУ НАЛИЧИЯ ИСТОЧНИКА
                 if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                     "$USER@$ip" "[ -d $REMOTE_DIR/results ] && [ -n \"\$(ls -A $REMOTE_DIR/results 2>/dev/null)\" ]"; then
                     
@@ -213,7 +273,23 @@ while true; do
         fi
     done
     
-    # === 13. Запрос о тестировании на другом хранилище ===
+    # === 14. Сохранение параметров для следующего теста ===
+    PREV_PARAMS_SET=true
+    PREV_STORAGE_TYPE=$STORAGE_TYPE
+    PREV_VM_COUNT=$VM_COUNT
+    PREV_VMS=("${VMS[@]}")
+    PREV_ITERATIONS=$ITERATIONS
+    PREV_TEST_MODE=$TEST_MODE
+    PREV_RUN_FIO=$RUN_FIO
+    PREV_RUN_PG=$RUN_PG
+    PREV_TEST_NAME=$TEST_NAME
+    PREV_SIZE=$SIZE
+    PREV_BS=$BS
+    PREV_MIX=$MIX
+    PREV_IO_DEPTH=$IO_DEPTH
+    PREV_RUNTIME=$RUNTIME
+    
+    # === 15. Запрос о тестировании на другом хранилище ===
     echo -e "\n$(printf '=%.0s' {1..60})"
     read -p "Будете тестировать на другом типе хранилища? (y/N): " next_storage
     if [[ ! $next_storage =~ ^[Yy]$ ]]; then
@@ -227,7 +303,7 @@ while true; do
         exit 0
     fi
     
-    # === 14. Информация о миграции ===
+    # === 16. Информация о миграции ===
     echo -e "\n$(printf '=%.0s' {1..60})"
     echo "⚠️  ВАЖНО: Перед продолжением выполните Storage vMotion всех ВМ на другое хранилище."
     echo "   Типы хранилищ в текущем тесте:"
