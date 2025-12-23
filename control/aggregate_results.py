@@ -30,6 +30,24 @@ def validate_fio_data(test_name, iops, bandwidth, latency):
         print(f"⚠️ Аномальные данные для '{test_name}': IOPS={iops:.1f}, Bandwidth={bandwidth:.1f}")
         print(f"   Ожидаемый диапазон bandwidth: {min_allowed:.1f}-{max_allowed:.1f}")
         return False
+    
+    # Проверка задержек
+    max_allowed_latency = {
+        "Sequential Read": 50,
+        "Sequential Write": 100,
+        "Random Read": 100,
+        "Random Write": 200,
+        "Mixed RW": 200
+    }
+    
+    # Определение типа теста
+    test_type = "Mixed RW" if "Mixed RW" in test_name else test_name.split()[0]
+    max_latency = max_allowed_latency.get(test_type, 300)  # значение по умолчанию
+    
+    if latency > max_latency:
+        print(f"⚠️ Аномальная задержка для '{test_name}': {latency:.2f}ms (макс. допустимая: {max_latency}ms)")
+        return False
+    
     return True
 
 def parse_results_sheet(file_path):
@@ -38,7 +56,7 @@ def parse_results_sheet(file_path):
         with open(file_path, 'r') as f:
             content = f.read()
         
-        results = {'fio': {}, 'pgbench': {}}
+        results = {'fio': {}, 'pgbench': {}, 'pgbench_section': ''}
         
         # Улучшенный парсинг результатов fio
         fio_pattern = r'(\d+)\s+(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)'
@@ -50,31 +68,38 @@ def parse_results_sheet(file_path):
             latency = float(match.group(5))
             
             # Валидация данных
-            if not validate_fio_data(test_name, iops, bandwidth, latency):
-                continue
-            
-            # Уникальный ключ для тестов с одинаковыми номерами
-            unique_key = test_name
-            if "Mixed RW" in test_name and "5" in str(test_num):
-                unique_key = f"Mixed RW {'(Read)' if 'Read' in test_name else '(Write)'}"
-            
-            results['fio'][unique_key] = {
-                'IOPS': iops,
-                'Bandwidth': bandwidth,
-                'Latency': latency
-            }
+            if validate_fio_data(test_name, iops, bandwidth, latency):
+                # Уникальный ключ для тестов с одинаковыми номерами
+                unique_key = test_name
+                if "Mixed RW" in test_name:
+                    # Определяем тип операции по содержимому строки
+                    if "Read" in test_name or "Чтение" in test_name:
+                        unique_key = "Mixed RW (Read)"
+                    elif "Write" in test_name or "Запись" in test_name:
+                        unique_key = "Mixed RW (Write)"
+                
+                results['fio'][unique_key] = {
+                    'IOPS': iops,
+                    'Bandwidth': bandwidth,
+                    'Latency': latency
+                }
         
         # Парсинг результатов pgbench
         pgbench_match = re.search(
-            r'TPS\s?:\s*([\d.]+).*?Средняя задержка:\s*([\d.]+).*?Обработано транзакций:\s*(\d+)',
+            r'TPS\s*\(Transactions Per Second\):\s*([\d.]+).*?Средняя задержка:\s*([\d.]+).*?Обработано транзакций:\s*(\d+)',
             content, re.DOTALL
         )
         if pgbench_match:
             results['pgbench'] = {
                 'TPS': float(pgbench_match.group(1)),
                 'Latency_Avg': float(pgbench_match.group(2)),
-                'Transactions': int(pgbench_match.group(3))
+                'Transactions': int(pgbench_match.group(3)),
+                'samples': 1
             }
+            # Сохраняем и текстовую секцию для отладки
+            pgbench_section_match = re.search(r'===+Результаты pgbench.*?(===+|$)', content, re.DOTALL)
+            if pgbench_section_match:
+                results['pgbench_section'] = pgbench_section_match.group(0)
         
         return results
     except Exception as e:
@@ -180,6 +205,30 @@ def aggregate_results(results_dir):
     
     return aggregated
 
+def debug_data_structure(aggregated_data, output_file):
+    """Отображает структуру агрегированных данных для диагностики"""
+    print("\n🔍 Структура агрегированных данных:")
+    print(f"  • Тип данных: {type(aggregated_data)}")
+    
+    if isinstance(aggregated_data, dict):
+        print(f"  • Ключи верхнего уровня: {', '.join(aggregated_data.keys())}")
+        
+        if 'fio' in aggregated_data:
+            print(f"  • Тесты FIO: {', '.join(aggregated_data['fio'].keys())}")
+            for test_name, metrics in aggregated_data['fio'].items():
+                print(f"    - {test_name}: {', '.join(metrics.keys())}")
+        
+        if 'pgbench' in aggregated_data:
+            print(f"  • Данные pgbench: {', '.join(aggregated_data['pgbench'].keys())}")
+        elif 'pgbench_section' in aggregated_data:
+            print("  • Найдены данные pgbench в текстовом формате")
+    
+    # Сохраняем полную структуру в файл для анализа
+    with open(f"{output_file}_structure_debug.txt", 'w') as f:
+        json.dump(aggregated_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"  • Полная структура сохранена в: {output_file}_structure_debug.txt")
+
 def generate_report(aggregated, output_file):
     """Генерирует отчет с детальной информацией о валидации данных"""
     report = []
@@ -248,6 +297,9 @@ def save_json(aggregated, output_file):
 def main():
     if len(sys.argv) < 2:
         print("Использование: python3 aggregate_results.py <путь_к_директории_с_результатами> [путь_2] ...")
+        print("\nПримеры:")
+        print("  python3 aggregate_results.py results/20251218_1619_local_1vms_2iter/")
+        print("  python3 aggregate_results.py results/*/")
         sys.exit(1)
     
     # Обработка нескольких директорий
@@ -264,6 +316,9 @@ def main():
         if not aggregated:
             print("❌ Не удалось агрегировать результаты")
             continue
+        
+        # Отладочная информация о структуре данных
+        debug_data_structure(aggregated, os.path.join(results_dir, "aggregated_report"))
         
         # Генерация отчетов
         output_base = os.path.join(results_dir, "aggregated_report")
