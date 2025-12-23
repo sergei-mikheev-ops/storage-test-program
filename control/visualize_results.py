@@ -43,6 +43,81 @@ def load_aggregated_data(json_file):
         print(f"❌ Ошибка загрузки {json_file}: {str(e)}")
         return None
 
+def add_value_labels(ax, bars, values):
+    """Добавляет значения на/внутри столбцов с адаптивным позиционированием"""
+    max_height = max(bar.get_height() for bar in bars if bar.get_height() > 0)
+    
+    for i, (bar, value) in enumerate(zip(bars, values)):
+        height = bar.get_height()
+        if height == 0:
+            continue
+            
+        # Определяем позицию текста
+        if height > max_height * 0.1:  # Достаточно большой столбец
+            if height > 10:  # Очень высокий столбец - текст внутри
+                text_y = height * 0.5
+                va = 'center'
+                color = 'white'
+                fontsize = max(8, 10 - len(bars))
+            else:  # Средний столбец - текст немного выше
+                text_y = height + (max_height * 0.05)
+                va = 'bottom'
+                color = 'black'
+                fontsize = 9
+        else:  # Маленький столбец - текст сбоку
+            text_y = height + (max_height * 0.05)
+            va = 'bottom'
+            color = 'black'
+            fontsize = 8
+        
+        ax.text(bar.get_x() + bar.get_width()/2., text_y,
+               f'{value:.1f}',
+               ha='center', va=va, fontsize=fontsize, color=color,
+               bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.5) if height < max_height * 0.1 else None)
+
+def extract_pgbench_data(data):
+    """Извлекает данные pgbench из разных форматов"""
+    if 'pgbench' in data and isinstance(data['pgbench'], dict):
+        # Стандартный JSON формат
+        pg_data = data['pgbench']
+        if 'TPS_mean' in pg_data:
+            return {
+                'TPS_mean': pg_data['TPS_mean'],
+                'TPS_stdev': pg_data.get('TPS_stdev', 0),
+                'Latency_Avg_mean': pg_data['Latency_Avg_mean'],
+                'Latency_Avg_stdev': pg_data.get('Latency_Avg_stdev', 0),
+                'samples': pg_data.get('samples', 1)
+            }
+        elif 'TPS' in pg_data:
+            return {
+                'TPS_mean': pg_data['TPS'],
+                'TPS_stdev': pg_data.get('TPS_stdev', 0),
+                'Latency_Avg_mean': pg_data['Latency_Avg'],
+                'Latency_Avg_stdev': pg_data.get('Latency_Avg_stdev', 0),
+                'samples': pg_data.get('samples', 1)
+            }
+    
+    # Поиск в текстовом формате
+    if 'pgbench_section' in data:
+        pgbench_text = data['pgbench_section']
+        tps_match = re.search(r'TPS\s*(?:\(Transactions Per Second\))?:\s*([\d.]+)', pgbench_text)
+        lat_match = re.search(r'Средняя задержка:\s*([\d.]+)\s*ms', pgbench_text)
+        
+        if tps_match and lat_match:
+            return {
+                'TPS_mean': float(tps_match.group(1)),
+                'TPS_stdev': 0.0,
+                'Latency_Avg_mean': float(lat_match.group(1)),
+                'Latency_Avg_stdev': 0.0,
+                'samples': 1
+            }
+    
+    # Поиск в результатах fio, где pgbench мог быть запущен отдельно
+    if 'fio' in data and any('pgbench' in test_name.lower() for test_name in data['fio'].keys()):
+        print(f"⚠️ Обнаружены результаты pgbench в разделе FIO для {data.get('label', 'unknown')}")
+    
+    return None
+
 def validate_data_for_visualization(datasets):
     """Проверяет данные на наличие необходимых полей и корректность"""
     valid_datasets = {}
@@ -151,18 +226,8 @@ def plot_fio_comparison(datasets, filtered_tests, output_dir):
                           yerr=errors, capsize=5, color=color, alpha=0.8,
                           label=f"{storage_type.upper()} ({data['num_vms']} VM)")
             
-            # Добавляем значения внутри столбцов
-            for i, bar in enumerate(bars):
-                height = bar.get_height()
-                if height > 0:
-                    # Позиция текста зависит от высоты столбца
-                    text_y = height * 0.5 if height > 10 else height + (height * 0.05)
-                    text_color = 'white' if height > 10 else 'black'
-                    fontsize = 8 if len(datasets) > 2 else 9
-                    
-                    ax.text(bar.get_x() + bar.get_width()/2., text_y,
-                           f'{height:.1f}',
-                           ha='center', va='center', fontsize=fontsize, color=text_color)
+            # Добавляем значения на/внутри столбцов
+            add_value_labels(ax, bars, values)
         
         # Настройки графика
         ax.set_xlabel('Тип теста', fontsize=12)
@@ -184,46 +249,46 @@ def plot_fio_comparison(datasets, filtered_tests, output_dir):
 
 def plot_pgbench_comparison(datasets, output_dir):
     """Создает графики сравнения pgbench тестов"""
-    # Фильтруем датасеты с данными pgbench
-    pgbench_data = {label: data for label, data in datasets.items() 
-                    if 'pgbench' in data and data['pgbench']}
+    pgbench_data = {}
+    
+    for label, data in datasets.items():
+        pg_data = extract_pgbench_data(data)
+        if pg_data:
+            pgbench_data[label] = pg_data
+            print(f"✅ Найдены данные pgbench для {label}: TPS={pg_data['TPS_mean']:.1f}, Latency={pg_data['Latency_Avg_mean']:.3f}ms")
+        else:
+            print(f"⚠️ Не найдены данные pgbench для {label}")
     
     if not pgbench_data:
-        print("⚠️  Нет данных pgbench для визуализации")
+        print("❌ Не удалось найти данные pgbench ни в одном формате")
+        # Создаем пустой файл-заглушку для отладки
+        with open(os.path.join(output_dir, 'pgbench_comparison_missing_data.txt'), 'w') as f:
+            f.write("Данные pgbench отсутствуют или не были распознаны\n")
+            f.write("Структура полученных данных:\n")
+            for label, data in datasets.items():
+                f.write(f"\n=== {label} ===\n")
+                f.write(json.dumps(data, indent=2, ensure_ascii=False))
         return
     
-    # Группируем данные по типам хранилищ
-    storage_groups = {}
-    for label, data in pgbench_data.items():
-        storage_type = get_storage_type(label)
-        vm_count = data.get('num_vms', 1)
-        key = (storage_type, vm_count)
-        
-        if key not in storage_groups:
-            storage_groups[key] = []
-        storage_groups[key].append(data['pgbench'])
-    
-    if not storage_groups:
-        print("⚠️  Нет группируемых данных pgbench")
-        return
+    print(f"✅ Найдены данные pgbench для {len(pgbench_data)} конфигураций")
     
     # Создаем два графика в одной фигуре
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     # График TPS
-    x = range(len(storage_groups))
+    x = range(len(pgbench_data))
     width = 0.6
     
-    for idx, ((storage_type, vm_count), pg_data) in enumerate(storage_groups.items()):
-        tps_values = [d['TPS_mean'] for d in pg_data]
-        tps_errors = [d['TPS_stdev'] for d in pg_data]
-        
-        avg_tps = mean(tps_values)
-        avg_error = mean(tps_errors) if len(tps_errors) > 1 else tps_errors[0]
-        
-        color = get_color_for_storage(storage_type)
-        bar = ax1.bar(idx, avg_tps, width, yerr=avg_error, capsize=10, 
-                     color=color, alpha=0.8, label=f"{storage_type.upper()} ({vm_count} VM)")
+    labels = list(pgbench_data.keys())
+    tps_values = [data['TPS_mean'] for data in pgbench_data.values()]
+    tps_errors = [data['TPS_stdev'] for data in pgbench_data.values()]
+    
+    storage_types = [get_storage_type(label) for label in labels]
+    colors = [get_color_for_storage(st) for st in storage_types]
+    
+    for i, (label, value, error, color) in enumerate(zip(labels, tps_values, tps_errors, colors)):
+        bar = ax1.bar(i, value, width, yerr=error, capsize=10, 
+                     color=color, alpha=0.8, label=label)
         
         # Добавляем значение на столбец
         height = bar[0].get_height()
@@ -233,23 +298,18 @@ def plot_pgbench_comparison(datasets, output_dir):
     
     ax1.set_xlabel('Конфигурация', fontsize=12)
     ax1.set_ylabel('TPS (транзакций в секунду)', fontsize=12)
-    ax1.set_title('Сравнение TPS (pgbench)', fontsize=14, fontweight='bold')
+    ax1.set_title('Сравнение производительности PostgreSQL (pgbench)', fontsize=14, fontweight='bold')
     ax1.set_xticks(x)
-    ax1.set_xticklabels([f"{storage.upper()}\n({vm} VM)" for (storage, vm) in storage_groups.keys()], 
-                       rotation=15, ha='center')
+    ax1.set_xticklabels([label.replace('_','-') for label in labels], rotation=15, ha='center')
     ax1.grid(axis='y', alpha=0.3)
     
     # График задержки
-    for idx, ((storage_type, vm_count), pg_data) in enumerate(storage_groups.items()):
-        lat_values = [d['Latency_Avg_mean'] for d in pg_data]
-        lat_errors = [d['Latency_Avg_stdev'] for d in pg_data]
-        
-        avg_lat = mean(lat_values)
-        avg_error = mean(lat_errors) if len(lat_errors) > 1 else lat_errors[0]
-        
-        color = get_color_for_storage(storage_type)
-        bar = ax2.bar(idx, avg_lat, width, yerr=avg_error, capsize=10,
-                     color=color, alpha=0.8, label=f"{storage_type.upper()} ({vm_count} VM)")
+    lat_values = [data['Latency_Avg_mean'] for data in pgbench_data.values()]
+    lat_errors = [data['Latency_Avg_stdev'] for data in pgbench_data.values()]
+    
+    for i, (label, value, error, color) in enumerate(zip(labels, lat_values, lat_errors, colors)):
+        bar = ax2.bar(i, value, width, yerr=error, capsize=10,
+                     color=color, alpha=0.8, label=label)
         
         # Добавляем значение на столбец
         height = bar[0].get_height()
@@ -259,11 +319,21 @@ def plot_pgbench_comparison(datasets, output_dir):
     
     ax2.set_xlabel('Конфигурация', fontsize=12)
     ax2.set_ylabel('Средняя задержка (ms)', fontsize=12)
-    ax2.set_title('Сравнение задержки (pgbench)', fontsize=14, fontweight='bold')
+    ax2.set_title('Сравнение задержек PostgreSQL (pgbench)', fontsize=14, fontweight='bold')
     ax2.set_xticks(x)
-    ax2.set_xticklabels([f"{storage.upper()}\n({vm} VM)" for (storage, vm) in storage_groups.keys()],
-                       rotation=15, ha='center')
+    ax2.set_xticklabels([label.replace('_','-') for label in labels], rotation=15, ha='center')
     ax2.grid(axis='y', alpha=0.3)
+    
+    # Создаем легенду с уникальными типами хранилищ
+    unique_types = {}
+    for label, st in zip(labels, storage_types):
+        vm_match = re.search(r'_(\d+)vms_', label)
+        vm_count = vm_match.group(1) if vm_match else "?"
+        unique_types[f"{st.upper()} ({vm_count} VM)"] = get_color_for_storage(st)
+    
+    legend_elements = [plt.Rectangle((0,0),1,1, color=color, alpha=0.8) 
+                      for color in unique_types.values()]
+    ax1.legend(legend_elements, unique_types.keys(), title='Тип хранилища')
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'pgbench_comparison.png'), dpi=300, bbox_inches='tight')
@@ -356,6 +426,42 @@ def plot_scalability_analysis(datasets, output_dir):
     
     print("✅ График масштабируемости создан")
 
+def debug_dataset_structure(datasets, output_dir):
+    """Сохраняет полную структуру данных для отладки"""
+    debug_file = os.path.join(output_dir, 'data_structure_debug.txt')
+    with open(debug_file, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("СТРУКТУРА ДАННЫХ ДЛЯ ВИЗУАЛИЗАЦИИ\n")
+        f.write("="*80 + "\n\n")
+        
+        for label, data in datasets.items():
+            f.write(f"=== {label} ===\n")
+            f.write(f"Тип данных: {type(data)}\n")
+            
+            if isinstance(data, dict):
+                f.write("Ключи верхнего уровня:\n")
+                for key in data.keys():
+                    f.write(f"  - {key}\n")
+                
+                # Структура FIO данных
+                if 'fio' in data and isinstance(data['fio'], dict):
+                    f.write("\nFIO тесты:\n")
+                    for test_name, metrics in data['fio'].items():
+                        f.write(f"  - {test_name}: {', '.join(metrics.keys())}\n")
+                        f.write(f"    Значения: {json.dumps(metrics, indent=6)}\n")
+                
+                # Структура pgbench данных
+                if 'pgbench' in data:
+                    f.write("\npgbench данные:\n")
+                    f.write(f"  {json.dumps(data['pgbench'], indent=4)}\n")
+                elif 'pgbench_section' in data:
+                    f.write("\npgbench_section (текст):\n")
+                    f.write(f"  {data['pgbench_section'][:200]}...\n")
+            
+            f.write("\n" + "="*80 + "\n")
+    
+    print(f"🔍 Структура данных сохранена для отладки: {debug_file}")
+
 def find_aggregated_reports(input_paths):
     """Находит все файлы с агрегированными данными в указанных путях"""
     report_files = []
@@ -428,6 +534,9 @@ def main():
     if not valid_datasets or not filtered_tests:
         print("❌ Нет валидных данных для визуализации")
         sys.exit(1)
+    
+    # Отладочная информация о структуре данных
+    debug_dataset_structure(valid_datasets, "visualization_output")
     
     # Создаем директорию для графиков
     output_dir = "visualization_output"
